@@ -1,10 +1,10 @@
 export type Kind = 'normal' | 'vip';
 export type Person = { id: string; name: string; color: string; normal: number; vip: number };
 export type Entry = { id: string; person: string; date: string; kind: Kind; shift: string; amount: number; received: number; note: string };
-export type Settings = { title: string; normalLabel: string; vipLabel: string; normalRate: number; vipRate: number };
+export type Settings = { title: string; normalLabel: string; vipLabel: string; normalRate: number; vipRate: number; folguista?: FolguistaData };
 export type WorkData = { people: Person[]; entries: Entry[]; settings: Settings; applied: string[] };
 export type Snapshot = { revision: number; data: WorkData };
-export type Command = { id: string; action: 'person.save' | 'person.delete' | 'entry.save' | 'entry.delete' | 'entry.receive' | 'entries.clear' | 'settings.save'; value: unknown };
+export type Command = { id: string; action: 'person.save' | 'person.delete' | 'entry.save' | 'entry.delete' | 'entry.receive' | 'entries.clear' | 'settings.save' | FolguistaAction; value: unknown };
 export class ValidationError extends Error {}
 export const emptyData = (): WorkData => ({ people: [], entries: [], applied: [], settings: { title: 'Meu Trabalho', normalLabel: 'Normal', vipLabel: 'VIP', normalRate: 38000, vipRate: 65000 } });
 function check(condition: unknown, message: string): asserts condition { if (!condition) throw new ValidationError(message); }
@@ -13,11 +13,12 @@ function text(v: unknown, name: string, max = 100, allowEmpty = false) { check(t
 function identifier(v: unknown) { const id = text(v, 'Identificador', 80); check(/^[a-zA-Z0-9_-]+$/.test(id), 'Identificador inválido.'); return id; }
 function cents(v: unknown, name: string, zero = false) { check(typeof v === 'number' && Number.isSafeInteger(v) && v >= (zero ? 0 : 1) && v <= 100000000, `${name} inválido. Use um valor de até R$ 1.000.000.`); return v; }
 export function validDate(v: unknown): v is string { if (typeof v !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(v)) return false; const date = new Date(v + 'T12:00:00Z'); return Number.isFinite(date.getTime()) && date.toISOString().slice(0, 10) === v && v >= '1900-01-01' && v <= '2200-12-31'; }
-export function parseCommand(raw: unknown): Command { const c = record(raw); const id = identifier(c.id); check(['person.save','person.delete','entry.save','entry.delete','entry.receive','entries.clear','settings.save'].includes(String(c.action)), 'Ação inválida.'); return { id, action: c.action as Command['action'], value: c.value }; }
+export function parseCommand(raw: unknown): Command { const c = record(raw); const id = identifier(c.id); check(['person.save','person.delete','entry.save','entry.delete','entry.receive','entries.clear','settings.save',"folguista.person.save","folguista.person.delete","folguista.entry.save","folguista.entry.delete","folguista.entry.setPaid"].includes(String(c.action)), 'Ação inválida.'); return { id, action: c.action as Command['action'], value: c.value }; }
 export function applyCommand(source: WorkData, command: Command): WorkData {
   if (source.applied.includes(command.id)) return source;
   const data = structuredClone(source), value = record(command.value);
-  switch (command.action) {
+  if(command.action.startsWith('folguista.'))applyFolguista(data,command,value);
+  else switch (command.action) {
     case 'person.save': {
       const p: Person = { id: identifier(value.id), name: text(value.name, 'Nome', 60), color: text(value.color, 'Cor', 7), normal: cents(value.normal, 'Diária normal'), vip: cents(value.vip, 'Diária VIP') };
       check(/^#[0-9a-fA-F]{6}$/.test(p.color), 'Cor inválida.');
@@ -38,7 +39,7 @@ export function applyCommand(source: WorkData, command: Command): WorkData {
     case 'entry.receive': { const id = identifier(value.id), entry = data.entries.find(e => e.id === id); check(entry, 'Este lançamento foi removido.'); const amount = cents(value.amount, 'Recebimento'); check(entry.received + amount <= entry.amount, 'O recebimento excede o saldo atual. Confira se outro aparelho já registrou esse pagamento.'); entry.received += amount; break; }
     case 'entry.delete': data.entries = data.entries.filter(e => e.id !== identifier(value.id)); break;
     case 'entries.clear': check(typeof value.confirmation === 'string' && value.confirmation.trim().toUpperCase() === 'LIMPAR', 'Digite limpar para confirmar.'); data.entries = []; break;
-    case 'settings.save': data.settings = { title: text(value.title, 'Nome do app', 45), normalLabel: text(value.normalLabel, 'Categoria normal', 24), vipLabel: text(value.vipLabel, 'Categoria VIP', 24), normalRate: cents(value.normalRate, 'Diária normal'), vipRate: cents(value.vipRate, 'Diária VIP') }; break;
+    case 'settings.save': data.settings = { ...data.settings, title: text(value.title, 'Nome do app', 45), normalLabel: text(value.normalLabel, 'Categoria normal', 24), vipLabel: text(value.vipLabel, 'Categoria VIP', 24), normalRate: cents(value.normalRate, 'Diária normal'), vipRate: cents(value.vipRate, 'Diária VIP') }; break;
   }
   data.applied = [...data.applied, command.id].slice(-100); return data;
 }
@@ -46,4 +47,53 @@ export function annualSummary(data: WorkData, year: string, person?: string) {
   const entries = data.entries.filter(e => e.date.startsWith(year + '-') && (!person || e.person === person));
   const amount = entries.reduce((a,e) => a + e.amount, 0), received = entries.reduce((a,e) => a + e.received, 0);
   return { amount, received, pending: amount - received, days: new Set(entries.map(e => e.date)).size, count: entries.length };
+}
+
+export type FolguistaPerson = { id: string; name: string; rate: number; color: string };
+export type Coverage = { id: string; person: string; date: string; amount: number; paid: boolean; note: string };
+export type FolguistaData = { people: FolguistaPerson[]; entries: Coverage[] };
+export type FolguistaAction = 'folguista.person.save' | 'folguista.person.delete' | 'folguista.entry.save' | 'folguista.entry.delete' | 'folguista.entry.setPaid';
+export const folguistaData = (data: WorkData): FolguistaData => data.settings.folguista ?? { people: [], entries: [] };
+export function folguistaSummary(data: WorkData, month: string, person?: string) {
+  const entries=folguistaData(data).entries.filter(e=>e.date.startsWith(month+'-')&&(!person||e.person===person));
+  const amount=entries.reduce((sum,e)=>sum+e.amount,0),paid=entries.reduce((sum,e)=>sum+(e.paid?e.amount:0),0);
+  return {amount,paid,pending:amount-paid,days:new Set(entries.map(e=>e.date)).size,count:entries.length};
+}
+function applyFolguista(data:WorkData,command:Command,value:Record<string,unknown>) {
+  const records=structuredClone(folguistaData(data));
+  switch(command.action) {
+    case 'folguista.person.save': {
+      const person:FolguistaPerson={id:identifier(value.id),name:text(value.name,'Nome',60),rate:cents(value.rate,'Diária do folguista'),color:text(value.color,'Cor',7)};
+      check(/^#[0-9a-fA-F]{6}$/.test(person.color),'Cor inválida.');
+      check(!records.people.some(p=>p.id!==person.id&&p.name.toLocaleLowerCase('pt-BR')===person.name.toLocaleLowerCase('pt-BR')),'Este folguista já está cadastrado.');
+      const index=records.people.findIndex(p=>p.id===person.id);
+      if(index>=0)records.people[index]=person;else {check(records.people.length<500,'Limite de folguistas atingido.');records.people.push(person);} break;
+    }
+    case 'folguista.person.delete': {
+      const id=identifier(value.id);
+      check(!records.entries.some(e=>e.person===id),'Este folguista tem dias registrados. Exclua os dias antes de remover o cadastro.');
+      records.people=records.people.filter(p=>p.id!==id); break;
+    }
+    case 'folguista.entry.save': {
+      check(validDate(value.date),'Data inválida.');check(typeof value.paid==='boolean','Situação do pagamento inválida.');
+      const entry:Coverage={id:identifier(value.id),person:identifier(value.person),date:value.date,amount:cents(value.amount,'Valor da cobertura'),paid:value.paid,note:text(value.note,'Observação',300,true)};
+      check(records.people.some(p=>p.id===entry.person),'O folguista foi removido. Atualize e escolha outro nome.');
+      check(!records.entries.some(e=>e.id!==entry.id&&e.person===entry.person&&e.date===entry.date),'Este folguista já tem uma cobertura neste dia. Edite o registro existente.');
+      const index=records.entries.findIndex(e=>e.id===entry.id);
+      if('before' in value)check(JSON.stringify(index>=0?records.entries[index]:null)===JSON.stringify(value.before),'Esta cobertura mudou em outro aparelho. Atualize e confira antes de salvar.');
+      if(index>=0)records.entries[index]=entry;else {check(records.entries.length<30000,'Limite de coberturas atingido.');records.entries.push(entry);} break;
+    }
+    case 'folguista.entry.setPaid': {
+      const id=identifier(value.id),entry=records.entries.find(e=>e.id===id);
+      check(entry,'Esta cobertura foi removida.');check(typeof value.paid==='boolean','Situação do pagamento inválida.');
+      check(JSON.stringify(entry)===JSON.stringify(value.before),'Esta cobertura mudou em outro aparelho. Atualize antes de marcar ou desmarcar.');
+      entry.paid=value.paid;break;
+    }
+    case 'folguista.entry.delete': {
+      const id=identifier(value.id),entry=records.entries.find(e=>e.id===id);
+      if(entry)check(JSON.stringify(entry)===JSON.stringify(value.before),'Esta cobertura mudou em outro aparelho. Atualize antes de excluir.');
+      records.entries=records.entries.filter(e=>e.id!==id);break;
+    }
+  }
+  data.settings.folguista=records;
 }
